@@ -10,4 +10,4 @@ package uk.gov.nationalarchives.csv.validator.metadata
 
 case class Row(cells: List[Cell], lineNumber: Int)
 
-case class Cell(value: String)
+case class Cell(value: String) //TODO(AR) extra class is extraneous, change to type alias `type Cell = String`

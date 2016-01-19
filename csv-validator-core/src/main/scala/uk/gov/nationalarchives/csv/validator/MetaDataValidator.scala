@@ -9,6 +9,8 @@
 package uk.gov.nationalarchives.csv.validator
 
 
+import com.fasterxml.jackson.databind.MappingIterator
+import com.fasterxml.jackson.dataformat.csv.{CsvParser, CsvMapper, CsvSchema}
 import uk.gov.nationalarchives.utf8.validator.{Utf8Validator, ValidationHandler}
 
 import scala.language.{postfixOps, reflectiveCalls}
@@ -20,7 +22,6 @@ import uk.gov.nationalarchives.csv.validator.schema._
 import uk.gov.nationalarchives.csv.validator.metadata.Cell
 import scalax.file.Path
 
-import com.opencsv.{CSVParser, CSVReader}
 import uk.gov.nationalarchives.csv.validator.metadata.Row
 import scala.annotation.tailrec
 import uk.gov.nationalarchives.csv.validator.api.TextFile
@@ -71,6 +72,28 @@ trait MetaDataValidator {
     validateKnownRows(csv, schema, pf)
   }
 
+  private def csvParser(globalDirectives: List[GlobalDirective], csv: JReader) : ManagedResource[MappingIterator[Array[String]]] = {
+    val separator: CsvSchema => CsvSchema = csvSchema => csvSchema.withColumnSeparator(globalDirectives.collectFirst {
+      case Separator(sep) =>
+        sep
+    }.getOrElse(CsvSchema.DEFAULT_COLUMN_SEPARATOR))
+
+    val quote: CsvSchema => CsvSchema = csvSchema => globalDirectives.collectFirst {
+      case q: Quoted =>
+        csvSchema.withQuoteChar(CsvSchema.DEFAULT_QUOTE_CHAR)
+    }.getOrElse(csvSchema.withoutQuoteChar())
+
+    val csvMapper = new CsvMapper()
+    csvMapper.enable(CsvParser.Feature.WRAP_AS_ARRAY)
+    val csvSchema = separator(quote(csvMapper.schema()))
+
+    managed(csvMapper
+      .readerFor(Array.empty[String].getClass())
+      .`with`(csvSchema)
+      .readValues(csv)
+    )
+  }
+
   /**
     * Browse csv File and return all the titleIndex as a list
     * @param csv the CSV reader
@@ -79,27 +102,13 @@ trait MetaDataValidator {
     * @return all the element of the column columnIndex
     */
   def getColumn(csv: JReader, schema: Schema, columnIndex: Int): List[String] = {
-
-    val separator = schema.globalDirectives.collectFirst {
-      case Separator(sep) =>
-        sep
-    }.getOrElse(CSVParser.DEFAULT_SEPARATOR)
-
-    val quote = schema.globalDirectives.collectFirst {
-      case q: Quoted =>
-        CSVParser.DEFAULT_QUOTE_CHARACTER
-    }
-
-    //TODO CSVReader does not appear to be RFC 4180 compliant as it does not support escaping a double-quote with a double-quote between double-quotes
-    //TODO CSVReader does not seem to allow you to enable/disable quoted columns
-    //we need a better CSV Reader!
-    (managed(new CSVReader(csv, separator, CSVParser.DEFAULT_QUOTE_CHARACTER, CSVParser.NULL_CHARACTER)) map {
-      reader =>
+    csvParser(schema.globalDirectives, csv).map {
+      it =>
         // if 'no header' is set but the file is empty and 'permit empty' has not been set - this is an error
         // if 'no header' is not set and the file is empty - this is an error
         // if 'no header' is not set and 'permit empty' is not set but the file contains only one line - this is an error
 
-        val rowIt = new RowIterator(reader, None)
+        val rowIt = new RowIterator(it, None)
 
         val maybeNoData =
           if (schema.globalDirectives.contains(NoHeader())) {
@@ -127,34 +136,20 @@ trait MetaDataValidator {
             getColumn(rowIt, columnIndex)
 
         }
-    } opt).getOrElse(Nil)
+    }.opt.getOrElse(Nil)
   }
 
 
   def validateKnownRows(csv: JReader, schema: Schema, progress: Option[ProgressFor]): MetaDataValidation[Any] = {
-
-    val separator = schema.globalDirectives.collectFirst {
-      case Separator(sep) =>
-        sep
-    }.getOrElse(CSVParser.DEFAULT_SEPARATOR)
-
-    val quote = schema.globalDirectives.collectFirst {
-      case q: Quoted =>
-        CSVParser.DEFAULT_QUOTE_CHARACTER
-    }
-
-    //TODO CSVReader does not appear to be RFC 4180 compliant as it does not support escaping a double-quote with a double-quote between double-quotes
-    //TODO CSVReader does not seem to allow you to enable/disable quoted columns
-    //we need a better CSV Reader!
-    managed(new CSVReader(csv, separator, CSVParser.DEFAULT_QUOTE_CHARACTER, CSVParser.NULL_CHARACTER)) map {
-      reader =>
+    csvParser(schema.globalDirectives, csv).map {
+      it =>
 
         // if 'no header' is set but the file is empty and 'permit empty' has not been set - this is an error
         // if 'no header' is not set and the file is empty - this is an error
         // if 'no header' is not set and 'permit empty' is not set but the file contains only one line - this is an error
 
 
-        val rowIt = new RowIterator(reader, progress)
+        val rowIt = new RowIterator(it, progress)
 
         val maybeNoData =
           if (schema.globalDirectives.contains(NoHeader())) {
@@ -334,29 +329,18 @@ trait ProgressCallback {
   def update(total: Int, processed: Int): Unit = update((processed.toFloat / total.toFloat) * 100)
 }
 
-class RowIterator(reader: CSVReader, progress: Option[ProgressFor]) extends Iterator[Row] {
-
-  private var index = 1
-  private var current = toRow(Option(reader.readNext()))
+class RowIterator(mappingIterator: MappingIterator[Array[String]], progress: Option[ProgressFor]) extends Iterator[Row] {
 
   @throws(classOf[IOException])
   override def next(): Row = {
-    val row = current match {
-      case Some(row) =>
-        row
-      case None => {
-        throw new IOException("End of file")
-      }
-    }
-
-    //move to the next
-    this.index = index + 1
-    this.current = toRow(Option(reader.readNext()))
+    val current = mappingIterator.next
+    val lineNr = mappingIterator.getCurrentLocation.getLineNr
+    val row = Row(current.map(Cell(_)).toList, lineNr)
 
     progress map {
       p =>
         if(p.rowsToValidate != -1) {
-          p.progress.update(p.rowsToValidate, index)
+          p.progress.update(p.rowsToValidate, lineNr)
         }
     }
 
@@ -365,11 +349,8 @@ class RowIterator(reader: CSVReader, progress: Option[ProgressFor]) extends Iter
 
   @throws(classOf[IOException])
   def skipHeader(): Row = {
-    this.index = index - 1
     next()
   }
 
-  override def hasNext: Boolean = current.nonEmpty
-
-  private def toRow(rowData: Option[Array[String]]): Option[Row] = rowData.map(data => Row(data.toList.map(Cell(_)), index))
+  override def hasNext: Boolean = mappingIterator.hasNext
 }
