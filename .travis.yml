@@ -5,6 +5,11 @@ language: scala
 scala:
         - 2.11.6
 
+matrix:
+        include:
+                - os: linux
+                - os: osx
+
 script: "mvn test verify -Dmaven.javadoc.skip=true"
 
 jdk:
