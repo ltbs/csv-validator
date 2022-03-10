@@ -110,12 +110,13 @@ trait SchemaParser extends SchemaParser1_0 {
   /**
     * [59] StringProvider ::= ColumnRef | StringLiteral
     */
-  override lazy val stringProvider: PackratParser[ArgProvider] = "StringProvider" ::= noext | concat | columnRef | stringLiteral ^^ {
+  override lazy val stringProvider: PackratParser[ArgProvider] = "StringProvider" ::= noExt | concat | columnRef | stringLiteral ^^ {
     s => Literal(Some(s))
   }
 
-
-  lazy val noext: PackratParser[ArgProvider] = "NoExt" ::= "noext(" ~> stringProvider <~ ")" ^^ {
+  // previously this was parsing for 'noext' whereas the schema defines it as 'noExt'
+  // to avoid breaking changes we now accept either
+  lazy val noExt: PackratParser[ArgProvider] = "NoExt" ::= "no[eE]xt\\(".r ~> stringProvider <~ ")" ^^ {
      NoExt(_)
   }
 
